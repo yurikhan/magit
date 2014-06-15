@@ -502,6 +502,7 @@ manager but it will be used in more places in the future."
     magit-insert-empty-line
     magit-insert-rebase-sequence
     magit-insert-am-sequence
+    magit-insert-cherry-pick-sequence
     magit-insert-bisect-output
     magit-insert-bisect-rest
     magit-insert-bisect-log
@@ -1311,7 +1312,7 @@ for compatibilty with git-wip (https://github.com/bartman/git-wip)."
     (define-key map [C-return] 'magit-dired-jump)
     (define-key map "\s"       'magit-show-or-scroll-up)
     (define-key map "\d"       'magit-show-or-scroll-down)
-    (define-key map "A" 'magit-cherry-pick)
+    (define-key map "A" 'magit-cherry-pick-popup)
     (define-key map "s" 'magit-stage-file)
     (define-key map "S" 'magit-stage-modified)
     (define-key map "u" 'magit-unstage-file)
@@ -1442,7 +1443,6 @@ for compatibilty with git-wip (https://github.com/bartman/git-wip)."
   (let ((map (make-sparse-keymap)))
     (define-key map "\r" 'magit-show-commit)
     (define-key map "a"  'magit-cherry-apply)
-    (define-key map "A"  'magit-cherry-pick)
     (define-key map "v"  'magit-revert-commit)
     map)
   "Keymap for `commit' sections.")
@@ -6133,33 +6133,95 @@ When the region is active offer to drop all contained stashes.
 
 ;;;;; Cherry-Pick
 
-(defun magit-cherry-pick (commit)
-  "Cherry-pick the commit at point.
-If there is no commit at point or with a prefix argument prompt
-for a commit."
-  (interactive
-   (let ((atpoint (magit-branch-or-commit-at-point))
-         (current (magit-get-current-branch)))
-     (when (equal atpoint current)
-       (setq atpoint nil))
-     (list (or (and (not current-prefix-arg) atpoint)
-               (magit-read-rev "Cherry-pick" atpoint current)))))
-  (magit-assert-one-parent commit "cherry-pick")
-  (magit-run-git "cherry-pick" commit))
+(magit-define-popup magit-cherry-pick-popup
+  "Popup console for cherry-pick commands."
+  'magit 'magit-popup-sequence-mode
+  :man-page "git-cherry-pick"
+  ;; TODO maybe --allow-empty, --allow-empty-message, --keep-redundant-commits
+  :switches '((?s "Add Signed-off-by lines"            "--signoff")
+              (?e "Edit commit messages"               "--edit")
+              (?x "Reference cherry in commit message" "-x")
+              (?F "Attempt fast-forward"               "--ff")
+              (?m "Reply merge relative to parent"     "--mainline="))
+  :options  '((?s "Strategy" "--strategy=" read-from-minibuffer))
+  :actions  '((?p "Cherry Pick"  magit-cherry-pick)
+              (?a "Cherry Apply" magit-cherry-apply))
+  :sequence-actions '((?c "Continue" magit-cherry-pick-continue)
+                      (?s "Skip"     magit-cherry-pick-skip)
+                      (?a "Abort"    magit-cherry-pick-abort))
+  :sequence-predicate 'magit-cherry-pick-in-progress-p)
 
-(defun magit-cherry-apply (commit)
-  "Cherry-pick the commit at point, leaving changes uncommitted.
-If there is no commit at point or with a prefix argument prompt
-for a commit."
-  (interactive
-   (let ((atpoint (magit-branch-or-commit-at-point))
-         (current (magit-get-current-branch)))
-     (when (equal atpoint current)
-       (setq atpoint nil))
-     (list (or (and (not current-prefix-arg) atpoint)
-               (magit-read-rev "Apply commit" atpoint current)))))
+;;;###autoload
+(defun magit-cherry-pick (commit &optional args)
+  (interactive (magit-cherry-pick-read-args "Cherry-pick"))
+  (magit-assert-one-parent (car (if (listp commit)
+                                    commit
+                                  (split-string commit "\\.\\.")))
+                           "cherry-pick")
+  (magit-run-git-sequencer "cherry-pick" args commit))
+
+;;;###autoload
+(defun magit-cherry-apply (commit &optional args)
+  (interactive (magit-cherry-pick-read-args "Apply commit"))
   (magit-assert-one-parent commit "cherry-pick")
-  (magit-run-git "cherry-pick" "--no-commit" commit))
+  (magit-run-git-sequencer "cherry-pick" "--no-commit" args commit))
+
+;;;###autoload
+(defun magit-cherry-pick-continue ()
+  (interactive)
+  (if (magit-cherry-pick-in-progress-p)
+      (if (magit-anything-unstaged-p)
+          (error "Cannot continue due to unstaged changes")
+        (magit-run-git-sequencer "cherry-pick" "--continue"))
+    (error "No cherry-pick in progress")))
+
+;;;###autoload
+(defun magit-cherry-pick-skip ()
+  (interactive)
+  (if (magit-cherry-pick-in-progress-p)
+      (magit-run-git-sequencer "cherry-pick" "--skip")
+    (error "No cherry-pick in progress")))
+
+;;;###autoload
+(defun magit-cherry-pick-abort ()
+  (interactive)
+  (if (magit-cherry-pick-in-progress-p)
+      (magit-run-git "cherry-pick" "--abort")
+    (error "No cherry-pick in progress")))
+
+(defun magit-cherry-pick-read-args (prompt)
+  (let ((selection (if (use-region-p)
+                       (magit-section-region-siblings)
+                     (list (magit-current-section)))))
+    (list (if (or current-prefix-arg
+                  (not selection)
+                  (not (eq (magit-section-type (car selection)) 'commit)))
+              (let ((atpoint (magit-branch-or-commit-at-point))
+                    (current (magit-get-current-branch)))
+                (when (equal atpoint current)
+                  (setq atpoint nil))
+                (magit-read-rev prompt atpoint current))
+            (nreverse (mapcar 'magit-section-value selection)))
+          magit-current-popup-args)))
+
+(defun magit-cherry-pick-in-progress-p ()
+  (file-regular-p (magit-git-dir "CHERRY_PICK_HEAD")))
+
+(defun magit-insert-cherry-pick-sequence ()
+  (when (magit-cherry-pick-in-progress-p)
+    (magit-insert-section (cherry-seq)
+      (magit-insert-heading "Cherry Picking:")
+      (let* ((lines (nreverse
+                     (magit-file-lines (magit-git-dir "sequencer/todo"))))
+             (stop (car (last lines))))
+        (dolist (line lines)
+          (when (string-match "^pick \\([^ ]+\\) \\(.*\\)$" line)
+            (magit-bind-match-strings (hash msg) line
+              (magit-insert-section (commit hash)
+                (insert (if (eq line stop) "stop " "pick ")
+                        (propertize hash 'face 'magit-hash))
+                (insert " " msg "\n"))))))
+      (insert "\n"))))
 
 ;;;;; Revert
 
