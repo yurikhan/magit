@@ -5429,6 +5429,15 @@ With prefix, forces the rename even if NEW already exists.
 
 ;;;;; AM
 
+(defun magit-format-patch (range)
+  (interactive
+   (if (use-region-p)
+       (let ((commits (magit-section-region-siblings)))
+         (list (concat (magit-section-value (car (last commits))) "^.."
+                       (magit-section-value (car commits)))))
+     ))
+  (magit-run-git "format-patch" range))
+
 (magit-define-popup magit-am-popup
   "Popup console for mailbox commands."
   'magit 'magit-popup-sequence-mode
