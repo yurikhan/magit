@@ -5520,7 +5520,7 @@ Return nil if there is no rebase in progress."
              (magit-read-rev "Interactively rebase to" (magit-guess-branch))))))
   (magit-assert-emacsclient "rebase interactively")
   (magit-with-emacsclient magit-server-window-for-rebase
-    (magit-run-git-async "rebase" "-i" commit)))
+    (magit-run-git-async "rebase" "--keep-empty" "-i" commit)))
 
 ;;;; AM
 
